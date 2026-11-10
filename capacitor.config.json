@@ -1,0 +1,8 @@
+{
+  "appId": "com.ruya.history",
+  "appName": "رؤيا في التاريخ",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "https"
+  }
+}
