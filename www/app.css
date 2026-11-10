@@ -166,6 +166,14 @@ details.fold > .fold-body { padding: 4px 12px 12px; }
 .paper .meta { text-align: center; color: #6a5420; font-size: 15px; margin-bottom: 4px; }
 .paper .orn { text-align: center; color: #b08a28; letter-spacing: 8px; margin: 10px 0 18px; font-size: 18px; }
 .paper .body p { font-size: var(--read-size); line-height: 2.15; margin: 0 0 .9em; text-align: justify; color: var(--ink); }
+.paper .body h2 {
+  font-size: calc(var(--read-size) + 3px); line-height: 1.6; color: #5a430c;
+  margin: 1.5em 0 .5em; padding-bottom: 6px; border-bottom: 1px solid rgba(176, 138, 40, .55);
+}
+.paper .body blockquote {
+  margin: .4em 0 1.1em; padding: 10px 14px; font-size: calc(var(--read-size) + 1px); line-height: 2; text-align: center;
+  color: #3a2c08; background: rgba(176, 138, 40, .13); border-right: 4px solid #b08a28; border-radius: 6px;
+}
 .paper .end { text-align: center; color: #b08a28; margin-top: 22px; font-size: 18px; letter-spacing: 6px; }
 
 /* ===== نافذة وإشعار ===== */

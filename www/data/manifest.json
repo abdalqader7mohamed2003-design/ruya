@@ -1,5 +1,5 @@
 {
-  "dataVersion": 1,
+  "dataVersion": 2,
   "files": [
     "anbiya.json",
     "duwal.json",
@@ -10,6 +10,7 @@
     "shakhsiyat.json",
     "hadara.json",
     "mudun.json",
-    "maarik.json"
+    "maarik.json",
+    "categories.json"
   ]
 }

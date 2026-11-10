@@ -131,8 +131,13 @@
     return a;
   }
 
+  // نص بلا علامات التنسيق (## للعنوان، > للاقتباس)
+  function plainText(text) {
+    return String(text).replace(/^(##|>)[ \t]+/gm, "");
+  }
   function excerpt(text) {
-    var t = String(text).replace(/\s+/g, " ").trim();
+    var first = String(text).split(/\n+/).filter(function (l) { return l.trim() && !/^##[ \t]/.test(l); })[0] || "";
+    var t = first.replace(/^>[ \t]+/, "").replace(/\s+/g, " ").trim();
     return t.length > 140 ? t.slice(0, 140) + "…" : t;
   }
 
@@ -205,10 +210,24 @@
     return out;
   }
 
+  // قائمة الأقسام الفرعية المعرّفة مسبقاً من categories.json (اختيارية)
+  function readCategories(json) {
+    var out = {};
+    if (!json || typeof json.sections !== "object" || !json.sections) return out;
+    Object.keys(json.sections).forEach(function (sec) {
+      var arr = json.sections[sec];
+      if (!Array.isArray(arr)) return;
+      out[String(sec).trim()] = arr.map(function (x) { return String(x).trim(); }).filter(Boolean);
+    });
+    return out;
+  }
+
   function applyPack(pack) {
     var byId = {};
     var list = [];
+    var catDef = readCategories(pack.files["categories.json"]);
     Object.keys(pack.files).forEach(function (name) {
+      if (name === "categories.json") return;
       normalizeFile(pack.files[name], name).forEach(function (s) {
         if (byId[s.id]) { console.warn("رقم مكرر تم تجاهله:", s.id); return; }
         byId[s.id] = s;
@@ -217,6 +236,11 @@
     });
     var index = {};
     var names = SECTIONS.slice();
+    Object.keys(catDef).forEach(function (sec) {
+      if (names.indexOf(sec) === -1) names.push(sec);
+      var node = index[sec] || (index[sec] = { all: [], subs: {} });
+      catDef[sec].forEach(function (sub) { if (!node.subs[sub]) node.subs[sub] = []; });
+    });
     list.forEach(function (s) {
       s.categories.forEach(function (c) {
         if (names.indexOf(c.section) === -1) names.push(c.section);
@@ -389,7 +413,7 @@
     });
   }
   function shareStory(s) {
-    var text = s.title + "\n\n" + s.text + "\n\n— تطبيق " + APP_NAME;
+    var text = s.title + "\n\n" + plainText(s.text) + "\n\n— تطبيق " + APP_NAME;
     try {
       var C = window.Capacitor;
       if (C && C.isNativePlatform && C.isNativePlatform() && C.registerPlugin) {
@@ -563,17 +587,18 @@
   function renderSection(name, sub) {
     var sec = state.index[name];
     view.appendChild(h("h2", { class: "page-title", text: name }));
-    if (!sec || !sec.all.length) {
+    var subNames = sec ? Object.keys(sec.subs) : [];
+    if (!sec || (!sec.all.length && !subNames.length)) {
       view.appendChild(h("div", { class: "empty", text: "لا توجد قصص في هذا القسم بعد." }));
       return;
     }
-    view.appendChild(h("p", { class: "sub-note", text: sec.all.length + " قصة" }));
-    var subNames = Object.keys(sec.subs);
+    view.appendChild(h("p", { class: "sub-note", text: sec.all.length ? sec.all.length + " قصة" : "لا توجد قصص في هذا القسم بعد." }));
     var target = null;
     subNames.forEach(function (sn) {
+      var stories = sec.subs[sn];
       var d = h("details", { class: "fold" },
-        h("summary", {}, h("span", {}, sn, h("span", { class: "count", text: "(" + sec.subs[sn].length + ")" }))),
-        h("div", { class: "fold-body" }, sec.subs[sn].map(card))
+        h("summary", {}, h("span", {}, sn, h("span", { class: "count", text: "(" + stories.length + ")" }))),
+        h("div", { class: "fold-body" }, stories.length ? stories.map(card) : [h("div", { class: "d-muted", text: "لا توجد قصص بعد." })])
       );
       if (sn === sub || subNames.length === 1) { d.open = true; if (sn === sub) target = d; }
       view.appendChild(d);
@@ -648,7 +673,11 @@
       s.figure ? h("div", { class: "meta", text: s.figure }) : null,
       h("div", { class: "meta", text: meta }),
       h("div", { class: "orn", text: "❖ ❖ ❖" }),
-      h("div", { class: "body" }, paras.map(function (p) { return h("p", { text: p }); })),
+      h("div", { class: "body" }, paras.map(function (p) {
+        if (/^##[ \t]+/.test(p)) return h("h2", { text: p.replace(/^##[ \t]+/, "") });
+        if (/^>[ \t]+/.test(p)) return h("blockquote", { text: p.replace(/^>[ \t]+/, "") });
+        return h("p", { text: p });
+      })),
       h("div", { class: "end", text: "❖" })
     ));
 
@@ -740,12 +769,11 @@
         return h("details", { class: "fold" },
           h("summary", {}, h("span", {}, name, h("span", { class: "count", text: "(" + sec.all.length + ")" }))),
           h("div", { class: "fold-body" },
-            sec.all.length
-              ? [dLink("#/section/" + encodeURIComponent(name), "عرض كل القصص")].concat(
-                  subs.map(function (sn) {
-                    return dLink("#/section/" + encodeURIComponent(name) + "/" + encodeURIComponent(sn), sn, "(" + sec.subs[sn].length + ")");
-                  }))
-              : [h("div", { class: "d-muted", text: "لا توجد قصص بعد." })])
+            (sec.all.length ? [dLink("#/section/" + encodeURIComponent(name), "عرض كل القصص")] : []).concat(
+              subs.map(function (sn) {
+                return dLink("#/section/" + encodeURIComponent(name) + "/" + encodeURIComponent(sn), sn, "(" + sec.subs[sn].length + ")");
+              }),
+              !sec.all.length && !subs.length ? [h("div", { class: "d-muted", text: "لا توجد قصص بعد." })] : []))
         );
       })
     );
