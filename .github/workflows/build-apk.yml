@@ -5,8 +5,12 @@ on:
     inputs:
       version:
         description: "رقم الإصدار الجديد (مثال: 1.0.1) - يجب أن يكون أكبر من السابق"
-        required: true
+        required: false
         default: "1.0.0"
+  push:
+    paths:
+      - ".github/workflows/build-apk.yml"
+      - "version.txt"
 
 permissions:
   contents: write
@@ -43,6 +47,11 @@ jobs:
             exit 1
           fi
           VERSION="${INPUT_VERSION#v}"
+          if [ -z "$VERSION" ] && [ -f version.txt ]; then
+            VERSION="$(tr -d ' \r\n' < version.txt)"
+            VERSION="${VERSION#v}"
+          fi
+          if [ -z "$VERSION" ]; then VERSION="1.0.0"; fi
           if ! echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$'; then
             echo "::error::رقم الإصدار غير صالح. اكتب مثلاً 1.0.1"
             exit 1
