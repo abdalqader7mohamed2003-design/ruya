@@ -1,62 +1,136 @@
 name: بناء التطبيق ونشر التحديث
 
+# يبدأ البناء تلقائياً عند رفع أي ملف zip إلى المستودع، أو عند تعديل version.txt،
+# أو يدوياً من تبويب Actions ثم Run workflow.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "رقم الإصدار الجديد (مثال: 1.0.1) - يجب أن يكون أكبر من السابق"
+        description: "رقم الإصدار (اختياري). اتركه فارغاً ليُحسب تلقائياً"
         required: false
-        default: "1.0.0"
+        default: ""
   push:
     paths:
-      - ".github/workflows/build-apk.yml"
+      - "*.zip"
       - "version.txt"
 
 permissions:
   contents: write
 
+concurrency:
+  group: build-apk
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: تجهيز ملفات المشروع من project.zip (أول مرة فقط)
+      - name: فك ملفات المشروع من ملف zip (إن وُجد)
         run: |
-          if [ -f project.zip ]; then
-            unzip -o project.zip
-            rm -f project.zip
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
-            git add -A
-            git commit -m "إضافة ملفات المشروع" || true
-            git push
+          set -e
+          shopt -s nullglob nocaseglob
+          ZIPS=( *.zip )
+          if [ ${#ZIPS[@]} -eq 0 ]; then
+            echo "لا يوجد ملف zip، سيُستخدم ما في المستودع كما هو."
+            exit 0
+          fi
+          for z in "${ZIPS[@]}"; do
+            echo "فك الملف: $z"
+            unzip -o -q "$z"
+            rm -f "$z"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -q -m "تحديث ملفات المشروع من ملف zip"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
 
-      - name: التحقق من الإعدادات
+      - name: فحص الملفات وكلمة السر
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          INPUT_VERSION: ${{ github.event.inputs.version }}
         run: |
-          if [ ! -f keystore/ryt.p12.enc ]; then
-            echo "::error::ملف المفتاح keystore/ryt.p12.enc غير موجود. ارفع project.zip أولاً"
-            exit 1
-          fi
+          set -e
+          for f in www/index.html www/app.js www/config.js www/data/manifest.json package.json capacitor.config.json keystore/ryt.p12.enc; do
+            if [ ! -f "$f" ]; then
+              echo "::error::الملف $f غير موجود. ارفع ملف المشروع project.zip كاملاً."
+              exit 1
+            fi
+          done
           if [ -z "$KEYSTORE_PASSWORD" ]; then
             echo "::error::السر KEYSTORE_PASSWORD غير مضاف. أضفه من Settings > Secrets and variables > Actions"
             exit 1
           fi
-          VERSION="${INPUT_VERSION#v}"
-          if [ -z "$VERSION" ] && [ -f version.txt ]; then
-            VERSION="$(tr -d ' \r\n' < version.txt)"
-            VERSION="${VERSION#v}"
-          fi
-          if [ -z "$VERSION" ]; then VERSION="1.0.0"; fi
-          if ! echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){1,2}$'; then
-            echo "::error::رقم الإصدار غير صالح. اكتب مثلاً 1.0.1"
+          if ! openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in keystore/ryt.p12.enc -out /dev/null -pass env:KEYSTORE_PASSWORD 2>/dev/null; then
+            echo "::error::كلمة السر KEYSTORE_PASSWORD غير صحيحة أو ملف المفتاح تالف."
             exit 1
           fi
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import json, os, sys
+          base = "www/data"
+          bad = False
+          try:
+              man = json.load(open(base + "/manifest.json", encoding="utf-8"))
+          except Exception as e:
+              print("::error::الملف www/data/manifest.json تالف:", e); sys.exit(1)
+          for name in man.get("files", []):
+              path = os.path.join(base, name)
+              if not os.path.isfile(path):
+                  print("::error::الملف المذكور في manifest غير موجود:", path); bad = True; continue
+              try:
+                  json.load(open(path, encoding="utf-8"))
+              except Exception as e:
+                  print("::error::ملف JSON تالف:", path, "|", e); bad = True
+          if bad: sys.exit(1)
+          print("ملفات البيانات سليمة. عددها:", len(man.get("files", [])), "| نسخة البيانات:", man.get("dataVersion"))
+          PY
+
+      - name: تحديد رقم الإصدار
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -e
+          python3 - <<'PY'
+          import os, re, subprocess
+          def parse(v):
+              p = [int(x) for x in v.split(".")]
+              while len(p) < 3: p.append(0)
+              return tuple(p)
+          def fmt(t): return ".".join(str(x) for x in t)
+          req = (os.environ.get("INPUT_VERSION") or "").strip().lstrip("vV")
+          if not req and os.path.isfile("version.txt"):
+              req = open("version.txt", encoding="utf-8").read().strip().lstrip("vV")
+          if not req: req = "1.0.0"
+          if not re.fullmatch(r"\d+(\.\d+){1,2}", req):
+              print("::error::رقم الإصدار غير صالح:", req, "— اكتب مثلاً 1.0.5"); raise SystemExit(1)
+          cur = parse(req)
+          repo = os.environ["GITHUB_REPOSITORY"]
+          r = subprocess.run(["gh", "api", f"repos/{repo}/releases/latest", "--jq", ".tag_name"], capture_output=True, text=True)
+          latest = r.stdout.strip().lstrip("vV") if r.returncode == 0 else ""
+          if re.fullmatch(r"\d+(\.\d+){1,2}", latest) and cur <= parse(latest):
+              l = parse(latest); cur = (l[0], l[1], l[2] + 1)
+              print(f"الرقم المطلوب {req} ليس أكبر من آخر إصدار {latest}، سيُستخدم {fmt(cur)}")
+          while subprocess.run(["gh", "release", "view", "v" + fmt(cur), "-R", repo], capture_output=True).returncode == 0:
+              cur = (cur[0], cur[1], cur[2] + 1)
+          ver = fmt(cur)
+          print("رقم الإصدار النهائي:", ver)
+          with open(os.environ["GITHUB_ENV"], "a") as f: f.write(f"VERSION={ver}\n")
+          code = cur[0] * 1000000 + cur[1] * 1000 + cur[2]
+          with open(os.environ["GITHUB_ENV"], "a") as f: f.write(f"VERSION_CODE={code}\n")
+          open("version.txt", "w", encoding="utf-8").write(ver + "\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add version.txt
+          if ! git diff --cached --quiet; then
+            git commit -q -m "رقم الإصدار ${VERSION}"
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "تعذر حفظ version.txt، لا يؤثر على البناء."
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -69,12 +143,15 @@ jobs:
 
       - name: ضبط رقم الإصدار والمستودع داخل التطبيق
         run: |
-          BRANCH="${{ github.ref_name }}"
-          sed -i "s#__REPO__#${GITHUB_REPOSITORY}#; s#__BRANCH__#${BRANCH}#; s#0.0.0-dev#${VERSION}#" www/config.js
+          set -e
+          sed -i "s#__REPO__#${GITHUB_REPOSITORY}#; s#__BRANCH__#${GITHUB_REF_NAME}#; s#0.0.0-dev#${VERSION}#" www/config.js
+          if grep -Eq "__REPO__|__BRANCH__|0\.0\.0-dev" www/config.js; then
+            echo "::error::تعذر ضبط إعدادات www/config.js"; exit 1
+          fi
           cat www/config.js
 
       - name: تثبيت الأدوات
-        run: npm install
+        run: npm install --no-audit --no-fund
 
       - name: إنشاء مشروع أندرويد
         run: npx cap add android
@@ -88,14 +165,17 @@ jobs:
 
       - name: رقم النسخة داخل أندرويد
         run: |
-          sed -i "s/versionCode [0-9]*/versionCode ${{ github.run_number }}/; s/versionName \".*\"/versionName \"${VERSION}\"/" android/app/build.gradle
+          set -e
+          sed -i "s/versionCode [0-9]*/versionCode ${VERSION_CODE}/; s/versionName \".*\"/versionName \"${VERSION}\"/" android/app/build.gradle
+          grep -q "versionCode ${VERSION_CODE}" android/app/build.gradle || { echo "::error::تعذر ضبط versionCode"; exit 1; }
+          grep -q "versionName \"${VERSION}\"" android/app/build.gradle || { echo "::error::تعذر ضبط versionName"; exit 1; }
           grep -n "versionCode\|versionName" android/app/build.gradle
 
       - name: بناء النسخة
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon --console=plain
 
-      - name: التوقيع بالمفتاح الثابت
+      - name: التوقيع بالمفتاح الثابت والتحقق منه
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
@@ -105,17 +185,40 @@ jobs:
             -out "$RUNNER_TEMP/ryt.p12" -pass env:KEYSTORE_PASSWORD
           mkdir -p out
           UNSIGNED=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          [ -n "$UNSIGNED" ] || { echo "::error::لم يُنتج ملف APK"; exit 1; }
           "$BT/zipalign" -p -f 4 "$UNSIGNED" out/aligned.apk
           "$BT/apksigner" sign --ks "$RUNNER_TEMP/ryt.p12" --ks-type pkcs12 \
             --ks-key-alias ryt --ks-pass env:KEYSTORE_PASSWORD \
             --out out/ruya-fi-altareekh.apk out/aligned.apk
-          "$BT/apksigner" verify --print-certs out/ruya-fi-altareekh.apk
-          rm -f "$RUNNER_TEMP/ryt.p12"
+          rm -f "$RUNNER_TEMP/ryt.p12" out/aligned.apk
+          "$BT/apksigner" verify --print-certs out/ruya-fi-altareekh.apk | tee out/certs.txt
+          CERT=$(sed -n 's/.*certificate SHA-256 digest: *//p' out/certs.txt | head -1 | tr -d ': ' | tr 'A-Z' 'a-z')
+          if [ -f keystore/cert.sha256 ]; then
+            EXPECT=$(tr -d ' \r\n:' < keystore/cert.sha256 | tr 'A-Z' 'a-z')
+            if [ "$CERT" != "$EXPECT" ]; then
+              echo "::error::بصمة المفتاح مختلفة عن المفتاح الأصلي. لن يتحدث التطبيق فوق النسخة القديمة. أوقفنا النشر."
+              exit 1
+            fi
+            echo "بصمة المفتاح مطابقة للمفتاح الأصلي."
+          fi
+
+      - name: حفظ نسخة احتياطية من الملف
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruya-fi-altareekh-apk
+          path: out/ruya-fi-altareekh.apk
+          retention-days: 30
 
       - name: نشر الإصدار
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -e
           gh release create "v${VERSION}" out/ruya-fi-altareekh.apk \
             --title "الإصدار ${VERSION}" \
-            --notes "تحديث تطبيق رؤيا في التاريخ"
+            --notes "تحديث تطبيق رؤيا في التاريخ — الإصدار ${VERSION}" \
+            --latest
+          {
+            echo "### تم بناء الإصدار ${VERSION} بنجاح ✓"
+            echo "حمّل الملف من صفحة **Releases** في المستودع، أو من داخل التطبيق: القائمة ثم التحقق من التحديثات."
+          } >> "$GITHUB_STEP_SUMMARY"
